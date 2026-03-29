@@ -2,19 +2,35 @@ import { useState, useCallback } from "react";
 
 // ─── API Config ───────────────────────────────────────────────────────────────
 
-const ARCTIC  = "https://arctic-shift.photon-reddit.com";
+const ARCTIC   = "https://arctic-shift.photon-reddit.com";
 const PULLPUSH = "https://api.pullpush.io";
 const REDDIT_BASE = "https://www.reddit.com";
 const LIMIT = 100;
 
-function buildUrls(username, type, { before, after } = {}) {
-    const base = [`limit=${LIMIT}`, `sort=desc`, `author=${encodeURIComponent(username)}`];
-    if (before) base.push(`before=${before}`);
-    if (after)  base.push(`after=${after}`);
+function buildUrls(username, type, pagination = {}, dateFilters = {}) {
+    const base = [
+        `limit=${LIMIT}`,
+        `sort=desc`,
+        `author=${encodeURIComponent(username)}`,
+    ];
+
+    // Pagination cursors take priority over date filter boundaries
+    if (pagination.before) {
+        base.push(`before=${pagination.before}`);
+    } else if (dateFilters.dateTo) {
+        base.push(`before=${dateFilters.dateTo}`);
+    }
+
+    if (pagination.after) {
+        base.push(`after=${pagination.after}`);
+    } else if (dateFilters.dateFrom) {
+        base.push(`after=${dateFilters.dateFrom}`);
+    }
+
     const qs = base.join("&");
 
     return {
-        arctic:   type === "posts"
+        arctic: type === "posts"
             ? `${ARCTIC}/api/posts/search?${qs}`
             : `${ARCTIC}/api/comments/search?${qs}`,
         pullpush: type === "posts"
@@ -72,7 +88,6 @@ function getCommentImage(comment) {
     return null;
 }
 
-/** Fetch one URL, return { data, ok } — never throws */
 async function safeFetch(url) {
     try {
         const res = await fetch(url, { headers: { Accept: "application/json" } });
@@ -84,12 +99,8 @@ async function safeFetch(url) {
     }
 }
 
-/**
- * Fetch from both Arctic Shift and PullPush in parallel, merge and deduplicate by id.
- * Returns { items, sources } where sources = ["arctic"|"pullpush"]
- */
-async function fetchBoth(username, type, pagination = {}) {
-    const { arctic, pullpush } = buildUrls(username, type, pagination);
+async function fetchBoth(username, type, pagination = {}, dateFilters = {}) {
+    const { arctic, pullpush } = buildUrls(username, type, pagination, dateFilters);
     const [arcticRes, pullpushRes] = await Promise.all([
         safeFetch(arctic),
         safeFetch(pullpush),
@@ -102,7 +113,6 @@ async function fetchBoth(username, type, pagination = {}) {
     if (arcticRes.ok && arcticRes.data.length > 0) sources.push("Arctic Shift");
     if (pullpushRes.ok && pullpushRes.data.length > 0) sources.push("PullPush");
 
-    // Interleave both lists, dedup by id, sort desc by created_utc
     [...arcticRes.data, ...pullpushRes.data].forEach((item) => {
         if (item.id && !seen.has(item.id)) {
             seen.add(item.id);
@@ -111,7 +121,6 @@ async function fetchBoth(username, type, pagination = {}) {
     });
 
     merged.sort((a, b) => b.created_utc - a.created_utc);
-
     return { items: merged, sources };
 }
 
@@ -151,12 +160,6 @@ const IconSpinner = () => (
     </svg>
 );
 
-const IconReddit = () => (
-    <svg className="w-7 h-7" viewBox="0 0 20 20" fill="currentColor">
-        <path d="M10 0C4.478 0 0 4.478 0 10c0 5.523 4.478 10 10 10 5.523 0 10-4.477 10-10C20 4.478 15.523 0 10 0zm5.838 10.295c.039.211.06.428.06.648 0 3.31-3.854 5.993-8.607 5.993S.684 14.253.684 10.943c0-.22.021-.437.06-.648a1.44 1.44 0 01-.575-1.152 1.443 1.443 0 012.56-.912C3.768 7.46 5.39 6.8 7.226 6.762l.857-4.02a.384.384 0 01.453-.296l2.83.592a1.005 1.005 0 111.965.397 1.006 1.006 0 01-1.005 1.005 1.003 1.003 0 01-.964-.728l-2.515-.526-.763 3.576c1.8.055 3.397.717 4.44 1.76a1.443 1.443 0 012.554.928 1.44 1.44 0 01-.54 1.143zM6.977 11.38a1.006 1.006 0 100 2.011 1.006 1.006 0 000-2.01zm3.875 2.965c-.537.537-1.575.58-1.864.58-.29 0-1.328-.043-1.865-.58a.253.253 0 00-.358.357c.681.68 1.896.747 2.223.747.326 0 1.54-.067 2.222-.747a.254.254 0 00-.358-.357zm-.108-2.965a1.006 1.006 0 100 2.011 1.006 1.006 0 000-2.01z" />
-    </svg>
-);
-
 const IconChevronLeft = () => (
     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -174,10 +177,9 @@ const IconChevronRight = () => (
 function PostCard({ post }) {
     const thumb = getPostThumbnail(post);
     const postUrl = `${REDDIT_BASE}${post.permalink}`;
-
     return (
         <a href={postUrl} target="_blank" rel="noopener noreferrer"
-           className="group block bg-[#1a1a1b] border border-[#343536] rounded-lg overflow-hidden hover:border-[#818384] transition-all duration-150 hover:shadow-lg">
+           className="group block bg-[#1a1a1b] border border-[#343536] rounded overflow-hidden hover:border-[#818384] transition-all duration-150 hover:shadow-lg">
             <div className="flex">
                 <div className="flex flex-col items-center justify-start gap-1 px-2.5 py-3 bg-[#161617] min-w-[44px]">
                     <IconArrowUp />
@@ -202,19 +204,15 @@ function PostCard({ post }) {
                             {post.title}
                         </p>
                         {post.selftext && post.selftext !== "[deleted]" && post.selftext !== "[removed]" && (
-                            <p className="text-[12px] text-[#818384] leading-relaxed line-clamp-2 mb-2">
-                                {post.selftext}
-                            </p>
+                            <p className="text-[12px] text-[#818384] leading-relaxed line-clamp-2 mb-2">{post.selftext}</p>
                         )}
                         <div className="flex items-center gap-3 text-[11px] text-[#818384]">
               <span className="flex items-center gap-1">
-                <IconComment />
-                  {fmtNum(post.num_comments)} comments
+                <IconComment />{fmtNum(post.num_comments)} comments
               </span>
                             {post.domain && !post.is_self && (
                                 <span className="flex items-center gap-1 text-[#4fbdba] truncate max-w-[200px]">
-                  <IconExternal />
-                  <span className="truncate">{post.domain}</span>
+                  <IconExternal /><span className="truncate">{post.domain}</span>
                 </span>
                             )}
                         </div>
@@ -238,10 +236,9 @@ function CommentCard({ comment }) {
     const url = `${REDDIT_BASE}${comment.permalink}`;
     const threadUrl = threadId ? `${REDDIT_BASE}/comments/${threadId}` : url;
     const img = getCommentImage(comment);
-
     return (
         <a href={url} target="_blank" rel="noopener noreferrer"
-           className="group block bg-[#1a1a1b] border border-[#343536] rounded-lg overflow-hidden hover:border-[#818384] transition-all duration-150 hover:shadow-lg">
+           className="group block bg-[#1a1a1b] border border-[#343536] rounded overflow-hidden hover:border-[#818384] transition-all duration-150 hover:shadow-lg">
             <div className="flex">
                 <div className="flex flex-col items-center justify-start gap-1 px-2.5 py-3 bg-[#161617] min-w-[44px]">
                     <IconArrowUp />
@@ -311,21 +308,19 @@ function TabBtn({ label, count, countIsPlus, active, onClick }) {
 
 // ─── Pagination ───────────────────────────────────────────────────────────────
 
-function Pagination({ page, hasPrev, hasNext, onPrev, onNext, loading, compact }) {
+function Pagination({ page, hasPrev, hasNext, onPrev, onNext, loading }) {
     if (!hasPrev && !hasNext) return null;
     return (
-        <div className={`flex items-center justify-center gap-3 ${compact ? "mb-4" : "mt-6"}`}>
+        <div className="flex items-center justify-center gap-3 mt-6">
             <button onClick={onPrev} disabled={!hasPrev || loading}
-                    className="flex items-center justify-center w-10 h-10 rounded-lg border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
+                    className="flex items-center justify-center w-10 h-10 rounded border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
                 <IconChevronLeft />
             </button>
             <span className="text-[12px] text-[#818384] min-w-[60px] text-center">
-        {loading
-            ? <span className="flex justify-center"><IconSpinner /></span>
-            : `Page ${page}`}
+        {loading ? <span className="flex justify-center"><IconSpinner /></span> : `Page ${page}`}
       </span>
             <button onClick={onNext} disabled={!hasNext || loading}
-                    className="flex items-center justify-center w-10 h-10 rounded-lg border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
+                    className="flex items-center justify-center w-10 h-10 rounded border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
                 <IconChevronRight />
             </button>
         </div>
@@ -335,18 +330,19 @@ function Pagination({ page, hasPrev, hasNext, onPrev, onNext, loading, compact }
 // ─── usePaginatedFetch ────────────────────────────────────────────────────────
 
 function usePaginatedFetch(type) {
-    const [items, setItems]       = useState([]);
-    const [sources, setSources]   = useState([]);
-    const [loading, setLoading]   = useState(false);
-    const [error, setError]       = useState(null);
-    const [page, setPage]         = useState(1);
-    const [pageStack, setPageStack] = useState([]); // [{firstUtc, lastUtc}]
+    const [items, setItems]         = useState([]);
+    const [sources, setSources]     = useState([]);
+    const [loading, setLoading]     = useState(false);
+    const [error, setError]         = useState(null);
+    const [page, setPage]           = useState(1);
+    const [pageStack, setPageStack] = useState([]);
+    const [storedFilters, setStoredFilters] = useState({});
 
-    const _fetch = useCallback(async (username, pagination = {}) => {
+    const _fetch = useCallback(async (username, pagination, filters) => {
         setLoading(true);
         setError(null);
         try {
-            const { items: data, sources: srcs } = await fetchBoth(username, type, pagination);
+            const { items: data, sources: srcs } = await fetchBoth(username, type, pagination, filters);
             setItems(data);
             setSources(srcs);
             return data;
@@ -359,10 +355,12 @@ function usePaginatedFetch(type) {
         }
     }, [type]);
 
-    const reset = useCallback(async (username) => {
+    // Called on new search or filter apply — resets pagination and stores filters
+    const reset = useCallback(async (username, filters = {}) => {
         setPage(1);
         setPageStack([]);
-        const data = await _fetch(username);
+        setStoredFilters(filters);
+        const data = await _fetch(username, {}, filters);
         if (data.length > 0) {
             setPageStack([{ firstUtc: data[0].created_utc, lastUtc: data[data.length - 1].created_utc }]);
         }
@@ -372,28 +370,28 @@ function usePaginatedFetch(type) {
     const goNext = useCallback(async (username) => {
         const current = pageStack[pageStack.length - 1];
         if (!current) return;
-        const data = await _fetch(username, { before: current.lastUtc });
+        const data = await _fetch(username, { before: current.lastUtc }, storedFilters);
         if (data.length > 0) {
             setPageStack((prev) => [...prev, { firstUtc: data[0].created_utc, lastUtc: data[data.length - 1].created_utc }]);
             setPage((p) => p + 1);
         }
         window.scrollTo({ top: 0, behavior: "smooth" });
-    }, [_fetch, pageStack]);
+    }, [_fetch, pageStack, storedFilters]);
 
     const goPrev = useCallback(async (username) => {
         if (pageStack.length <= 1) return;
         const newStack = pageStack.slice(0, -1);
         const prevEntry = newStack[newStack.length - 2];
-        const data = await _fetch(username, prevEntry ? { after: prevEntry.firstUtc } : {});
+        const data = await _fetch(username, prevEntry ? { after: prevEntry.firstUtc } : {}, storedFilters);
         if (data.length > 0) {
             newStack[newStack.length - 1] = { firstUtc: data[0].created_utc, lastUtc: data[data.length - 1].created_utc };
         }
         setPageStack(newStack);
         setPage((p) => p - 1);
         window.scrollTo({ top: 0, behavior: "smooth" });
-    }, [_fetch, pageStack]);
+    }, [_fetch, pageStack, storedFilters]);
 
-    return { items, sources, loading, error, page, pageStack, reset, goNext, goPrev };
+    return { items, sources, loading, error, page, reset, goNext, goPrev };
 }
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
@@ -401,14 +399,24 @@ function usePaginatedFetch(type) {
 const TABS = ["posts", "comments"];
 
 export default function App() {
-    const [username, setUsername]     = useState("");
-    const [query, setQuery]           = useState("");
-    const [activeTab, setActiveTab]   = useState("posts");
-    const [searched, setSearched]     = useState(false);
+    const [username, setUsername]           = useState("");
+    const [query, setQuery]                 = useState("");
+    const [activeTab, setActiveTab]         = useState("posts");
+    const [searched, setSearched]           = useState(false);
     const [initialLoading, setInitialLoading] = useState(false);
+    const [dateFrom, setDateFrom]           = useState("");
+    const [dateTo, setDateTo]               = useState("");
 
     const posts    = usePaginatedFetch("posts");
     const comments = usePaginatedFetch("comments");
+
+    // Convert date strings to epoch seconds for the APIs
+    const buildFilters = useCallback(() => {
+        const f = {};
+        if (dateFrom) f.dateFrom = Math.floor(new Date(dateFrom).getTime() / 1000);
+        if (dateTo)   f.dateTo   = Math.floor(new Date(dateTo).getTime()   / 1000);
+        return f;
+    }, [dateFrom, dateTo]);
 
     const handleSubmit = useCallback(async (e) => {
         e.preventDefault();
@@ -417,13 +425,29 @@ export default function App() {
         setQuery(user);
         setSearched(true);
         setInitialLoading(true);
-        await Promise.all([posts.reset(user), comments.reset(user)]);
+        const filters = buildFilters();
+        await Promise.all([posts.reset(user, filters), comments.reset(user, filters)]);
         setInitialLoading(false);
-    }, [username, posts, comments]);
+    }, [username, buildFilters, posts, comments]);
+
+    const applyFilters = useCallback(async () => {
+        if (!query) return;
+        setInitialLoading(true);
+        const filters = buildFilters();
+        await Promise.all([posts.reset(query, filters), comments.reset(query, filters)]);
+        setInitialLoading(false);
+    }, [query, buildFilters, posts, comments]);
+
+    const clearFilters = useCallback(async () => {
+        setDateFrom("");
+        setDateTo("");
+        if (!query) return;
+        setInitialLoading(true);
+        await Promise.all([posts.reset(query, {}), comments.reset(query, {})]);
+        setInitialLoading(false);
+    }, [query, posts, comments]);
 
     const active = activeTab === "posts" ? posts : comments;
-
-    // Combined sources label
     const allSources = [...new Set([...posts.sources, ...comments.sources])];
 
     return (
@@ -433,23 +457,36 @@ export default function App() {
             {/* Header */}
             <header className="border-b border-[#1c1c1d] bg-[#0d0d0d] sticky top-0 z-20">
                 <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
-                    <button onClick={() => { setSearched(false); setUsername(""); setQuery(""); }}
-                            className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-                        <img src="/bot.png" alt="logo" className="w-10 h-10 rounded-full object-cover" />
-                        <span className="text-[22px] font-semibold tracking-tight text-white">
+                    <button onClick={() => { setSearched(false); setUsername(""); setQuery(""); setDateFrom(""); setDateTo(""); }}
+                            className="group flex items-center gap-2">
+                        <img src="/bot.png" alt="logo" className="w-10 h-10 rounded-full object-cover flex-shrink-0" />
+                        <span className="text-[22px] font-semibold tracking-tight text-white whitespace-nowrap max-w-0 overflow-hidden opacity-0 group-hover:max-w-xs group-hover:opacity-100 transition-all duration-300 ease-out">
               reddit<span className="text-[#ff4500]">OSINT</span>
             </span>
+                        <span className="text-[11px] text-[#818384] border border-[#343536] rounded px-1.5 py-0.5 flex-shrink-0">beta</span>
                     </button>
-                    <span className="ml-1 text-[11px] text-[#818384] border border-[#343536] rounded px-1.5 py-0.5">beta</span>
+                    <div className="flex-1 flex justify-end items-center gap-4">
+                        <a href="/changelog.html" target="_blank" rel="noopener noreferrer"
+                           title="Changelog"
+                           className="text-[11px] text-[#818384] hover:text-[#d7dadc] border border-[#343536] hover:border-[#818384] rounded px-2.5 py-1 transition-colors">
+                            Changelog
+                        </a>
+                        <a href="https://github.com/zuxu4n/RedditOsint" target="_blank" rel="noopener noreferrer"
+                           title="GitHub" className="text-[#818384] hover:text-white transition-colors">
+                            <svg className="w-7 h-7" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+                            </svg>
+                        </a>
+                    </div>
                 </div>
             </header>
 
-            {/* Search */}
-            <div className={`max-w-3xl mx-auto px-4 transition-all duration-300 ${searched ? "pt-6" : "pt-56"}`}>
+            {/* Hero / Search */}
+            <div className={`max-w-3xl mx-auto px-4 transition-all duration-300 ${searched ? "pt-6" : "pt-20"}`}>
                 {!searched && (
-                    <div className="text-center mb-8">
-                        <h1 className="font-bold text-white mb-2 tracking-tight whitespace-nowrap" style={{fontSize:"43px"}}>Reddit User Intelligence</h1>
-                        <p className="text-sm text-[#cccccc]">View private accounts and deleted posts/comments from any user.</p>
+                    <div className="text-center mb-2">
+                        <img src="/rosintTitle.png" alt="redditOSINT" className="mx-auto mb-4" style={{ width: "578px", maxWidth: "90vw" }} />
+                        <p className="text-sm text-[#cccccc]">View private accounts and deleted posts/comments from any user via distributed open-source archives.</p>
                     </div>
                 )}
 
@@ -458,42 +495,79 @@ export default function App() {
                         <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#cccccc] text-base font-medium select-none">u/</span>
                         <input type="text" value={username} onChange={(e) => setUsername(e.target.value)}
                                placeholder="username"
-                               className="w-full bg-[#1a1a1b] border border-[#343536] rounded-lg pl-10 pr-4 py-2.5 text-sm text-white placeholder-[#818384] focus:outline-none focus:border-[#ff4500] transition-colors"
+                               className="w-full bg-[#1a1a1b] border border-[#343536] rounded pl-10 pr-4 py-2.5 text-sm text-white placeholder-[#818384] focus:outline-none focus:border-[#ff4500] transition-colors"
                                autoFocus />
                     </div>
                     <button type="submit" disabled={!username.trim() || initialLoading}
-                            className="flex items-center gap-2 bg-[#ff4500] hover:bg-[#e03d00] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium text-sm px-5 py-2.5 rounded-lg transition-colors">
+                            className="flex items-center gap-2 bg-[#ff4500] hover:bg-[#e03d00] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium text-sm px-5 py-2.5 rounded transition-colors">
                         {initialLoading ? <IconSpinner /> : <IconSearch />}
-                        {searched && (initialLoading ? "Searching…" : "Search")}
+                        {initialLoading && "Searching…"}
                     </button>
                 </form>
+
+                {!searched && (
+                    <div className="flex items-center gap-2 flex-wrap mt-3">
+                        <span className="text-[11px] text-[#818384]">From</span>
+                        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+                               className="bg-[#1a1a1b] border border-[#343536] rounded-sm px-2 py-1 text-[12px] text-[#d7dadc] focus:outline-none focus:border-[#ff4500] transition-colors [color-scheme:dark]" />
+                        <span className="text-[11px] text-[#818384]">To</span>
+                        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+                               className="bg-[#1a1a1b] border border-[#343536] rounded-sm px-2 py-1 text-[12px] text-[#d7dadc] focus:outline-none focus:border-[#ff4500] transition-colors [color-scheme:dark]" />
+                        {(dateFrom || dateTo) && (
+                            <button type="button" onClick={() => { setDateFrom(""); setDateTo(""); }}
+                                    className="px-3 py-1 text-[12px] text-[#818384] hover:text-[#d7dadc] transition-colors">
+                                Clear
+                            </button>
+                        )}
+                    </div>
+                )}
             </div>
 
             {/* Results */}
             {searched && (
                 <div className="max-w-3xl mx-auto px-4 mt-6 pb-16">
 
-                    {/* Summary */}
+                    {/* Summary + date filters */}
                     {!initialLoading && (
-                        <p className="text-[12px] text-[#818384] mb-4">
-                            Results for <span className="text-[#ff4500] font-medium">u/{query}</span>
-                            {allSources.length > 0 && (
-                                <> · {allSources.map((src, i) => {
-                                    const url = src === "Arctic Shift"
-                                        ? "https://github.com/ArthurHeitmann/arctic_shift"
-                                        : "https://pullpush.io/";
-                                    return (
-                                        <span key={src}>
-                      {i > 0 && <span className="text-[#818384]"> + </span>}
-                                            <a href={url} target="_blank" rel="noopener noreferrer"
-                                               className="text-[#d7dadc] hover:text-white hover:underline transition-colors">
-                        {src}
-                      </a>
-                    </span>
-                                    );
-                                })}</>
-                            )}
-                        </p>
+                        <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
+                            <p className="text-[12px] text-[#818384]">
+                                Results for <span className="text-[#ff4500] font-medium">u/{query}</span>
+                                {allSources.length > 0 && (
+                                    <> · {allSources.map((src, i) => {
+                                        const url = src === "Arctic Shift"
+                                            ? "https://github.com/ArthurHeitmann/arctic_shift"
+                                            : "https://pullpush.io/";
+                                        return (
+                                            <span key={src}>
+                        {i > 0 && <span className="text-[#818384]"> + </span>}
+                                                <a href={url} target="_blank" rel="noopener noreferrer"
+                                                   className="text-[#d7dadc] hover:text-white hover:underline transition-colors">
+                          {src}
+                        </a>
+                      </span>
+                                        );
+                                    })}</>
+                                )}
+                            </p>
+                            <div className="flex items-center gap-2">
+                                <span className="text-[11px] text-[#818384]">From</span>
+                                <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+                                       className="bg-[#1a1a1b] border border-[#343536] rounded-sm px-2 py-1 text-[12px] text-[#d7dadc] focus:outline-none focus:border-[#ff4500] transition-colors [color-scheme:dark]" />
+                                <span className="text-[11px] text-[#818384]">To</span>
+                                <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+                                       className="bg-[#1a1a1b] border border-[#343536] rounded-sm px-2 py-1 text-[12px] text-[#d7dadc] focus:outline-none focus:border-[#ff4500] transition-colors [color-scheme:dark]" />
+                                <button onClick={applyFilters} disabled={initialLoading}
+                                        className="px-3 py-1 text-[12px] font-medium bg-[#ff4500] hover:bg-[#e03d00] disabled:opacity-50 text-white rounded-sm transition-colors">
+                                    Apply
+                                </button>
+                                {(dateFrom || dateTo) && (
+                                    <button onClick={clearFilters} disabled={initialLoading}
+                                            className="px-3 py-1 text-[12px] text-[#818384] hover:text-[#d7dadc] transition-colors">
+                                        Clear
+                                    </button>
+                                )}
+                            </div>
+                        </div>
                     )}
 
                     {/* Tabs + inline pagination */}
@@ -511,14 +585,14 @@ export default function App() {
                         {!initialLoading && !active.loading && active.items.length > 0 && (active.page > 1 || active.items.length >= LIMIT) && (
                             <div className="flex items-center gap-2 pb-2">
                                 <button onClick={() => active.goPrev(query)} disabled={active.page <= 1 || active.loading}
-                                        className="flex items-center justify-center w-7 h-7 rounded border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
+                                        className="flex items-center justify-center w-7 h-7 rounded-sm border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
                                     <IconChevronLeft />
                                 </button>
                                 <span className="text-[11px] text-[#818384]">
                   {active.loading ? <IconSpinner /> : `Page ${active.page}`}
                 </span>
                                 <button onClick={() => active.goNext(query)} disabled={active.items.length < LIMIT || active.loading}
-                                        className="flex items-center justify-center w-7 h-7 rounded border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
+                                        className="flex items-center justify-center w-7 h-7 rounded-sm border border-[#343536] hover:border-[#818384] text-[#d7dadc] transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
                                     <IconChevronRight />
                                 </button>
                             </div>
@@ -526,15 +600,11 @@ export default function App() {
                     </div>
 
                     {/* Archive notice */}
-                    {!initialLoading && searched && (
+                    {!initialLoading && (
                         <div className="text-[11px] text-[#818384] mb-3 leading-relaxed">
                             This archive updates <strong className="text-[#818384]">monthly</strong>. For newer activity,{" "}
-                            <a
-                                href={`https://www.reddit.com/search/?q=author%3A%22${query}%22&type=${activeTab}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-[#ff4500] hover:underline"
-                            >
+                            <a href={`https://www.reddit.com/search/?q=author%3A%22${query}%22&type=${activeTab}`}
+                               target="_blank" rel="noopener noreferrer" className="text-[#ff4500] hover:underline">
                                 click here
                             </a>{" "}
                             to search Reddit directly.
@@ -563,7 +633,6 @@ export default function App() {
                                     <CommentCard key={comment.id} comment={comment} />
                                 ))}
                             </div>
-
                             <Pagination
                                 page={active.page}
                                 hasPrev={active.page > 1}
